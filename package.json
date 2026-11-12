@@ -1,0 +1,12 @@
+{
+  "name": "parquea-huila",
+  "version": "1.0.0",
+  "description": "Parqueadero de ejemplo para la clase de CI/CD con GitHub Actions y AWS",
+  "private": true,
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test \"test/**/*.test.js\""
+  },
+  "engines": { "node": ">=22.13" }
+}

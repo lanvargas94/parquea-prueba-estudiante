@@ -1,0 +1,19 @@
+# Ambiente de PRODUCCIÓN (la EC2). No construye nada: descarga la imagen que armó el pipeline en GHCR.
+# El pipeline deja en app/.env las variables IMAGEN y TAG.
+services:
+  app:
+    image: ${IMAGEN:?falta IMAGEN}:${TAG:?falta TAG}
+    environment:
+      APP_VERSION: ${TAG}
+    ports:
+      - "80:3000"               # internet entra por el 80; la app escucha en el 3000
+    volumes:
+      - datos:/data             # los datos sobreviven a cada despliegue
+    mem_limit: 200m             # la t3.nano solo tiene 512 MB
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }   # que los logs no llenen el disco
+
+volumes:
+  datos:

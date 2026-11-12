@@ -1,0 +1,119 @@
+# Pipeline de ParqueaHuila
+#   cualquier push o PR -> 1 pruebas -> 2 imagen + escaneo de seguridad
+#   push a main         -> además publica la imagen en GHCR
+#                       -> 3 despliega en la EC2 -> 4 comprueba que salió la versión nueva
+#
+# Para que corran los pasos 3 y 4 (Settings -> Secrets and variables -> Actions):
+#   Secrets:   EC2_HOST (IP pública de la EC2), EC2_SSH_KEY (contenido del .pem)
+#   Variables: DESPLEGAR_EC2 = si
+# Sin esa variable el pipeline llega hasta GHCR y no toca ningún servidor (cero costo en AWS).
+name: CI-CD
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: write        # para publicar en ghcr.io con el GITHUB_TOKEN
+
+env:
+  REGISTRO: ghcr.io
+
+jobs:
+  pruebas:
+    name: 1 · Pruebas
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - run: npm test
+
+  imagen:
+    name: 2 · Imagen + seguridad
+    needs: pruebas        # si las pruebas fallan, este trabajo NO corre
+    runs-on: ubuntu-latest
+    outputs:
+      imagen: ${{ steps.nombre.outputs.imagen }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Nombre de la imagen (GHCR exige minúsculas)
+        id: nombre
+        run: |
+          echo "imagen=${REGISTRO}/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+          echo "IMAGEN=${REGISTRO}/${GITHUB_REPOSITORY,,}:${GITHUB_SHA}" >> "$GITHUB_ENV"
+
+      - name: Construir
+        run: |
+          docker build -t "$IMAGEN" \
+            --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" .
+
+      - name: DevSecOps · escanear con Trivy (falla si hay CRÍTICAS con arreglo)
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.57.1 \
+            image --quiet --exit-code 1 --severity CRITICAL --ignore-unfixed "$IMAGEN"
+
+      - name: Publicar en GHCR (solo main)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login "$REGISTRO" -u "${{ github.actor }}" --password-stdin
+          for intento in 1 2 3; do
+            docker push "$IMAGEN" && exit 0
+            echo "::warning::push rechazado (intento $intento de 3); reintento en 15 s"
+            sleep 15
+          done
+          exit 1
+
+  desplegar:
+    name: 3 · Desplegar en EC2
+    needs: imagen
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.DESPLEGAR_EC2 == 'si'
+    runs-on: ubuntu-latest
+    concurrency: produccion          # nunca dos despliegues al tiempo
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Preparar la llave SSH
+        run: |
+          install -m 700 -d ~/.ssh
+          echo "${{ secrets.EC2_SSH_KEY }}" | tr -d '\r' > ~/.ssh/ec2.pem
+          chmod 600 ~/.ssh/ec2.pem
+          ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Copiar compose.prod.yml y actualizar
+        env:
+          IMAGEN: ${{ needs.imagen.outputs.imagen }}
+          TAG: ${{ github.sha }}
+        run: |
+          scp -i ~/.ssh/ec2.pem compose.prod.yml ec2-user@${{ secrets.EC2_HOST }}:app/compose.prod.yml
+          ssh -i ~/.ssh/ec2.pem ec2-user@${{ secrets.EC2_HOST }} bash -s <<EOF
+            set -e
+            cd app
+            printf 'IMAGEN=%s\nTAG=%s\n' "${IMAGEN}" "${TAG}" > .env
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            docker compose -f compose.prod.yml pull
+            docker compose -f compose.prod.yml up -d --wait
+            docker logout ghcr.io
+            docker image prune -af --filter "until=24h"
+          EOF
+
+  verificar:
+    name: 4 · Verificar en producción
+    needs: desplegar
+    runs-on: ubuntu-latest
+    steps:
+      - name: ¿Salió la versión nueva?
+        run: |
+          for i in $(seq 1 10); do
+            real=$(curl -fs http://${{ secrets.EC2_HOST }}/api/status | jq -r .version || true)
+            echo "intento $i: en producción=${real:-sin respuesta}  esperada=${GITHUB_SHA}"
+            [ "$real" = "$GITHUB_SHA" ] && exit 0
+            sleep 3
+          done
+          echo "::error::Producción no muestra la versión ${GITHUB_SHA}"
+          exit 1
