@@ -1,7 +1,7 @@
 // Reglas del negocio del parqueadero. Funciones puras: no tocan base de datos ni red,
 // por eso se prueban fácil (ver test/reglas.test.js).
 
-const TARIFA_POR_HORA = { carro: 3000, moto: 1500 };   // pesos colombianos
+const TARIFA_POR_HORA = { carro: 3500, moto: 1500 };   // pesos colombianos
 const CUPOS = { carro: 20, moto: 10 };
 
 // Placas de Colombia: carro "ABC123", moto "ABC12D"
